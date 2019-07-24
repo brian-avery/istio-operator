@@ -509,7 +509,7 @@ webhooks:
       namespace: istio-operator
       path: /validate-smmr
   namespaceSelector: {}
-  
+
 ---
 
 apiVersion: v1
@@ -548,6 +548,9 @@ spec:
       - name: discovery-cache
         emptyDir:
           medium: Memory
+      - name: smcp-templates
+        configMap:
+          name: smcp-templates
       containers:
         - name: istio-operator
           image: registry.redhat.io/openshift-istio-tech-preview/istio-operator-rhel8:0.12.0
@@ -571,3 +574,5 @@ spec:
           volumeMounts:
           - name: discovery-cache
             mountPath: /home/istio-operator/.kube/cache/discovery
+          - name: smcp-templates
+            mountPath: /etc/istio-operator/templates

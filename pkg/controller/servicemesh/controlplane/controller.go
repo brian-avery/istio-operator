@@ -2,6 +2,11 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"strings"
+
 	"github.com/maistra/istio-operator/pkg/bootstrap"
 
 	v1 "github.com/maistra/istio-operator/pkg/apis/maistra/v1"
@@ -95,8 +100,114 @@ type ReconcileControlPlane struct {
 }
 
 const (
-	finalizer = "istio-operator-ControlPlane"
+	finalizer           = "istio-operator-ControlPlane"
+	scmpTemplatePath    = "/etc/istio-operator/templates/"
+	smcpDefaultTemplate = "maistra"
 )
+
+func getSMCPTemplate(name string) (*v1.ControlPlaneSpec, error) {
+	fmt.Printf("Bavery getSMCPTemplate. Name: %s\n", name)
+	//TODO(bavery_question) should templates be specified as foo.yaml or as foo? -- probably foo.yaml to avoid confusion
+	if strings.Contains(name, "/") {
+		fmt.Printf("Bavery name contains /\n")
+		return nil, fmt.Errorf("Template name contains invalid character '/'")
+	}
+
+	templateContent, err := ioutil.ReadFile(scmpTemplatePath + name)
+	fmt.Printf("Bavery. templateContent: %q\n", templateContent)
+	if err != nil {
+		return nil, err
+	}
+
+	var template v1.ServiceMeshControlPlane
+	if err = json.Unmarshal(templateContent, &templateContent); err != nil {
+		fmt.Printf("Bavery failed to parse templateContent: %s\n", err.Error())
+		return nil, err
+	}
+	fmt.Printf("Bavery read template from FS: %+v\n", template)
+	return &template.Spec, nil
+}
+
+//TODO(bavery) -- use pointers?
+func mergeValues(base map[string]interface{}, input map[string]interface{}) map[string]interface{} {
+	for key, value := range input {
+		//if they key doesn't already exist, add it
+		if _, exists := base[key]; !exists {
+			base[key] = value
+			continue
+		}
+
+		//value is either a value or another map. If it's a value, just set it
+		inputAsMap, ok := value.(map[string]interface{})
+		if !ok {
+			base[key] = value
+			continue
+		}
+
+		//if base is a map and input is a value, overwrite with input
+		_, isMap := base[key].(map[string]interface{})
+		if !isMap {
+			base[key] = value
+			continue
+		}
+
+		// if we got this far, it's a map in both. Merge them.
+		base[key] = mergeValues(base, inputAsMap)
+	}
+
+	return base
+}
+
+func reconcileTemplates(smcp *v1.ControlPlaneSpec) (*v1.ControlPlaneSpec, error) {
+	fmt.Printf("Bavery reconciling template. Template: %s\n", smcp.Template)
+	//for each file
+	// #PROCESS TEMPLATES base case:
+	//		template exists? continue -- can likely ignore, but highlighting base case
+	// 		template not empty?
+	//  		find template in configmap
+	//   			does not exist? Return error
+	//   			GOTO PROCESS_TEMPLATES
+	//
+	//		mergeValues Istio
+	//		mergeValues Threescale
+
+	if smcp.Template == "" {
+		fmt.Printf("Bavery hit base case. Returning SMCP template: %+v\n\n\n", smcp)
+		return smcp, nil
+	}
+
+	template, err := getSMCPTemplate(smcp.Template)
+	if err != nil {
+		return nil, err
+	}
+
+	template, err = reconcileTemplates(template)
+	if err != nil {
+		return nil, err
+	}
+
+	smcp.Istio = mergeValues(smcp.Istio, template.Istio)
+	smcp.ThreeScale = mergeValues(smcp.ThreeScale, template.ThreeScale)
+
+	return smcp, nil
+}
+
+func getServiceMeshControlPlane(smcp *v1.ServiceMeshControlPlane) (*v1.ServiceMeshControlPlane, error) {
+	fmt.Printf("Bavery getting ServiceMeshControlPlane.\n")
+	//if a template is not set in the initial CP, assign the Maistra one. This will be a common template between OSSM & Maistra
+	if smcp.Spec.Template == "" {
+		fmt.Printf("Template not set. Loading default.")
+		smcp.Spec.Template = "maistra.yaml"
+	}
+
+	smcpSpec, err := reconcileTemplates(&smcp.Spec)
+	if err != nil {
+		return nil, err
+	}
+	smcp.Spec = *smcpSpec
+	return smcp, nil
+
+}
 
 // Reconcile reads that state of the cluster for a ServiceMeshControlPlane object and makes changes based on the state read
 // and what is in the ServiceMeshControlPlane.Spec
@@ -124,9 +235,14 @@ func (r *ReconcileControlPlane) Reconcile(request reconcile.Request) (reconcile.
 		return reconcile.Result{}, err
 	}
 
+	smcp, err := getServiceMeshControlPlane(instance)
+	if err != nil {
+		return reconcile.Result{}, err
+	}
+
 	reconciler := ControlPlaneReconciler{
 		ReconcileControlPlane: r,
-		Instance:              instance,
+		Instance:              smcp,
 		Status:                v1.NewControlPlaneStatus(),
 		UpdateStatus: func() error {
 			return r.Client.Status().Update(context.TODO(), instance)

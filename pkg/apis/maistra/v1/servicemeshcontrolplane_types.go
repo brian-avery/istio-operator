@@ -51,14 +51,17 @@ type HelmValuesType map[string]interface{}
 
 // ControlPlaneSpec represents the configuration for installing a control plane
 type ControlPlaneSpec struct {
+	Template string `json:"template,omitempty"`
+
 	// NetworkType of the cluster.  Defaults to subnet.
 	NetworkType NetworkType    `json:"networkType,omitempty"`
-	Istio      HelmValuesType `json:"istio,omitempty"`
-	ThreeScale HelmValuesType `json:"threeScale,omitempty"`
+	Istio       HelmValuesType `json:"istio,omitempty"`
+	ThreeScale  HelmValuesType `json:"threeScale,omitempty"`
 }
 
 // NetworkType is type definition representing the network type of the cluster
 type NetworkType string
+
 const (
 	// NetworkTypeSubnet when using ovs-subnet
 	NetworkTypeSubnet NetworkType = "subnet"
