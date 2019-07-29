@@ -1,0 +1,9 @@
+---
+apiVersion: maistra.io/v1
+kind: ServiceMeshControlPlane
+spec:
+  template: strangeLoop.yaml
+  istio:
+    global:
+      hub: quay.io/maistra
+      tag: qe-latest

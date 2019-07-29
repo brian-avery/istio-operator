@@ -2,11 +2,13 @@ package controlplane
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"strings"
 
+	"github.com/ghodss/yaml"
+
+	"github.com/go-logr/logr"
 	"github.com/maistra/istio-operator/pkg/bootstrap"
 
 	v1 "github.com/maistra/istio-operator/pkg/apis/maistra/v1"
@@ -102,78 +104,66 @@ type ReconcileControlPlane struct {
 const (
 	finalizer           = "istio-operator-ControlPlane"
 	scmpTemplatePath    = "/etc/istio-operator/templates/"
-	smcpDefaultTemplate = "maistra"
+	smcpDefaultTemplate = "maistra.yaml"
 )
 
 func getSMCPTemplate(name string) (*v1.ControlPlaneSpec, error) {
-	fmt.Printf("Bavery getSMCPTemplate. Name: %s\n", name)
-	//TODO(bavery_question) should templates be specified as foo.yaml or as foo? -- probably foo.yaml to avoid confusion
 	if strings.Contains(name, "/") {
-		fmt.Printf("Bavery name contains /\n")
-		return nil, fmt.Errorf("Template name contains invalid character '/'")
+		return nil, fmt.Errorf("template name contains invalid character '/'")
 	}
 
 	templateContent, err := ioutil.ReadFile(scmpTemplatePath + name)
-	fmt.Printf("Bavery. templateContent: %q\n", templateContent)
 	if err != nil {
 		return nil, err
 	}
 
 	var template v1.ServiceMeshControlPlane
-	if err = json.Unmarshal(templateContent, &templateContent); err != nil {
-		fmt.Printf("Bavery failed to parse templateContent: %s\n", err.Error())
-		return nil, err
+	if err = yaml.Unmarshal(templateContent, &template); err != nil {
+		return nil, fmt.Errorf("failed to parse template %s contents: %s", name, err)
+
 	}
-	fmt.Printf("Bavery read template from FS: %+v\n", template)
 	return &template.Spec, nil
 }
 
 //TODO(bavery) -- use pointers?
 func mergeValues(base map[string]interface{}, input map[string]interface{}) map[string]interface{} {
+	if base == nil {
+		base = make(map[string]interface{}, 0)
+	}
+
 	for key, value := range input {
-		//if they key doesn't already exist, add it
+		//if the key doesn't already exist, add it
 		if _, exists := base[key]; !exists {
 			base[key] = value
 			continue
 		}
 
-		//value is either a value or another map. If it's a value, just set it
+		//at this point, key exists in both input and base. Is the value a map?
+		//if it's not a map, replace whatever is in base with the value.
 		inputAsMap, ok := value.(map[string]interface{})
 		if !ok {
 			base[key] = value
 			continue
 		}
 
-		//if base is a map and input is a value, overwrite with input
-		_, isMap := base[key].(map[string]interface{})
-		if !isMap {
-			base[key] = value
-			continue
+		//at this point, we know the key exists in both base and input.
+		//We also know that it's a map. Validate that it's a map and recurse again.
+		baseKeyAsMap, ok := base[key].(map[string]interface{})
+		if !ok {
+			baseKeyAsMap = make(map[string]interface{}, 0)
 		}
-
-		// if we got this far, it's a map in both. Merge them.
-		base[key] = mergeValues(base, inputAsMap)
+		base[key] = mergeValues(baseKeyAsMap, inputAsMap)
 	}
-
 	return base
 }
 
-func reconcileTemplates(smcp *v1.ControlPlaneSpec) (*v1.ControlPlaneSpec, error) {
-	fmt.Printf("Bavery reconciling template. Template: %s\n", smcp.Template)
-	//for each file
-	// #PROCESS TEMPLATES base case:
-	//		template exists? continue -- can likely ignore, but highlighting base case
-	// 		template not empty?
-	//  		find template in configmap
-	//   			does not exist? Return error
-	//   			GOTO PROCESS_TEMPLATES
-	//
-	//		mergeValues Istio
-	//		mergeValues Threescale
-
+func reconcileTemplates(smcp *v1.ControlPlaneSpec, visited map[string]struct{}) (*v1.ControlPlaneSpec, error) {
 	if smcp.Template == "" {
-		fmt.Printf("Bavery hit base case. Returning SMCP template: %+v\n\n\n", smcp)
 		return smcp, nil
+	}
+
+	if _, ok := visited[smcp.Template]; ok {
+		return nil, fmt.Errorf("Templates form cyclic dependency. Cannot proceed")
 	}
 
 	template, err := getSMCPTemplate(smcp.Template)
@@ -181,28 +171,28 @@ func reconcileTemplates(smcp *v1.ControlPlaneSpec) (*v1.ControlPlaneSpec, error)
 		return nil, err
 	}
 
-	template, err = reconcileTemplates(template)
+	visited[smcp.Template] = struct{}{}
+	template, err = reconcileTemplates(template, visited)
 	if err != nil {
 		return nil, err
 	}
 
 	smcp.Istio = mergeValues(smcp.Istio, template.Istio)
 	smcp.ThreeScale = mergeValues(smcp.ThreeScale, template.ThreeScale)
-
 	return smcp, nil
 }
 
-func getServiceMeshControlPlane(smcp *v1.ServiceMeshControlPlane) (*v1.ServiceMeshControlPlane, error) {
-	fmt.Printf("Bavery getting ServiceMeshControlPlane.\n")
-	//if a template is not set in the initial CP, assign the Maistra one. This will be a common template between OSSM & Maistra
+func getServiceMeshControlPlane(reqLogger logr.Logger, smcp *v1.ServiceMeshControlPlane) (*v1.ServiceMeshControlPlane, error) {
+	reqLogger.Info("Processing ServiceMeshControlPlane templates")
+	//if a template is not set in the initial CP, assign the default one.
 	if smcp.Spec.Template == "" {
-		fmt.Printf("Template not set. Loading default.")
-		smcp.Spec.Template = "maistra.yaml"
+		reqLogger.Info("Template not set. Loading defaults.")
+		smcp.Spec.Template = smcpDefaultTemplate
 	}
 
-	smcpSpec, err := reconcileTemplates(&smcp.Spec)
+	smcpSpec, err := reconcileTemplates(&smcp.Spec, make(map[string]struct{}, 0))
 	if err != nil {
-		return nil, err
+		return smcp, err
 	}
 	smcp.Spec = *smcpSpec
 	return smcp, nil
@@ -235,7 +225,7 @@ func (r *ReconcileControlPlane) Reconcile(request reconcile.Request) (reconcile.
 		return reconcile.Result{}, err
 	}
 
-	smcp, err := getServiceMeshControlPlane(instance)
+	smcp, err := getServiceMeshControlPlane(reqLogger, instance)
 	if err != nil {
 		return reconcile.Result{}, err
 	}
