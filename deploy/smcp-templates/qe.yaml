@@ -1,9 +1,0 @@
----
-apiVersion: maistra.io/v1
-kind: ServiceMeshControlPlane
-spec:
-  template: product.yaml
-  istio:
-    global:
-      hub: quay.io/maistra
-      tag: qe-latest
