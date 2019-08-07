@@ -208,34 +208,51 @@ func (r *ControlPlaneReconciler) Reconcile() (reconcile.Result, error) {
 	return reconcile.Result{Requeue: true}, nil
 }
 
+func (r *ControlPlaneReconciler) validateSMCPSpec(spec v1.ControlPlaneSpec) error {
+	if spec.Istio == nil {
+		return fmt.Errorf("ServiceMeshControlPlane missing Istio section")
+	}
+
+	if _, ok := spec.Istio["global"].(map[string]interface{}); !ok {
+		return fmt.Errorf("ServiceMeshControlPlane missing global section")
+	}
+	return nil
+}
+
 func (r *ControlPlaneReconciler) renderCharts() error {
+	//Generate the spec
+	r.Status.LastAppliedConfiguration = r.Instance.Spec
+	if err := r.validateSMCPSpec(r.Status.LastAppliedConfiguration); err != nil {
+		return err
+	}
+
+	if globalValues, ok := r.Status.LastAppliedConfiguration.Istio["global"].(map[string]interface{}); ok {
+		globalValues["operatorNamespace"] = r.OperatorNamespace
+	}
+
+	var CNIValues map[string]interface{}
+	var ok bool
+	if CNIValues, ok = r.Status.LastAppliedConfiguration.Istio["istio_cni"].(map[string]interface{}); !ok {
+		CNIValues = make(map[string]interface{})
+		r.Status.LastAppliedConfiguration.Istio["istio_cni"] = CNIValues
+	}
+
+	CNIValues["enabled"] = common.IsCNIEnabled
+
+	//render the charts
 	r.Log.Info("rendering helm charts")
 	allErrors := []error{}
 	var err error
 	var threeScaleRenderings map[string][]manifest.Manifest
 
-	if globalValues, ok := r.Instance.Spec.Istio["global"].(map[string]interface{}); ok {
-		globalValues["operatorNamespace"] = r.OperatorNamespace
-	} else {
-		return fmt.Errorf("Could not set operatorNamespace value, as .Values.global is not a map[string]interface{}: %v", err)
-	}
-
-	var CNIValues map[string]interface{}
-	var ok bool
-	if CNIValues, ok = r.Instance.Spec.Istio["istio_cni"].(map[string]interface{}); !ok {
-		CNIValues = make(map[string]interface{})
-		r.Instance.Spec.Istio["istio_cni"] = CNIValues
-	}
-	CNIValues["enabled"] = common.IsCNIEnabled
-
 	r.Log.V(2).Info("rendering Istio charts")
-	istioRenderings, _, err := common.RenderHelmChart(path.Join(common.ChartPath, "istio"), r.Instance.GetNamespace(), r.Instance.Spec.Istio)
+	istioRenderings, _, err := common.RenderHelmChart(path.Join(common.ChartPath, "istio"), r.Instance.GetNamespace(), r.Status.LastAppliedConfiguration.Istio)
 	if err != nil {
 		allErrors = append(allErrors, err)
 	}
-	if isEnabled(r.Instance.Spec.ThreeScale) {
+	if isEnabled(r.Status.LastAppliedConfiguration.ThreeScale) {
 		r.Log.V(2).Info("rendering 3scale charts")
-		threeScaleRenderings, _, err = common.RenderHelmChart(path.Join(common.ChartPath, "maistra-threescale"), r.Instance.GetNamespace(), r.Instance.Spec.ThreeScale)
+		threeScaleRenderings, _, err = common.RenderHelmChart(path.Join(common.ChartPath, "maistra-threescale"), r.Instance.GetNamespace(), r.Status.LastAppliedConfiguration.ThreeScale)
 		if err != nil {
 			allErrors = append(allErrors, err)
 		}
