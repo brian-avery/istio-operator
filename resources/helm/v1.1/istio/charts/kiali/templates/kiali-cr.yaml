@@ -17,6 +17,9 @@ spec:
 {{- if and .Values.hub .Values.image }}
     image_name: "{{ .Values.hub }}/{{ .Values.image }}"
 {{- end }}
+{{- if and .Values.hub .Values.image .Values.tag -}}
+    image_version: "{{.Values.tag}}"
+{{- end -}}
     image_pull_policy: "{{ .Values.global.imagePullPolicy }}"
 {{- if .Values.global.imagePullSecrets }}
     image_pull_secrets: 
